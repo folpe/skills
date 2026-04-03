@@ -11,6 +11,13 @@ Claude Code skills by [@folpe](https://github.com/folpe).
 
 ## Install
 
+All skills:
 ```bash
 npx skills add folpe/skills
+```
+
+Individual skills:
+```bash
+npx skills add folpe/skills -s rhetorique-master
+npx skills add folpe/skills -s rvp-positioning
 ```
