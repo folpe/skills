@@ -11,7 +11,6 @@ Claude Code skills by [@folpe](https://github.com/folpe).
 
 ## Install
 
-```
-claude install-skill folpe/skills/rhetorique-master
-claude install-skill folpe/skills/rvp-positioning
+```bash
+npx skills add folpe/skills
 ```
