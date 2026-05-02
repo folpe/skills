@@ -1,7 +1,7 @@
 ---
 name: capture-todo
 description: >
-  Use when the user expresses a task, idea, reminder, or note in any form — dictated, typed, mid-sentence, or as an explicit "add to my todo". Triggers: "remind me to", "I need to", "don't forget", "add to my list", "todo", "note ça", "j'ai pensé à", "il faudrait", "rappelle-moi", any imperative or future-action phrasing not tied to the current task. Routes the captured item into Todoist with the right project, section, labels (duration/energy/context), date, and priority. Also exposes daily-pull and digest primitives for morning briefings using the GTD-allégé methodology (configurable).
+  Use when the user expresses a task, idea, reminder, or note in any form — dictated, typed, mid-sentence, or as an explicit "add to my todo". Triggers: "remind me to", "I need to", "don't forget", "add to my list", "todo", "note ça", "j'ai pensé à", "il faudrait", "rappelle-moi", "j'oublie pas", "faut que je", "une idée à creuser", any imperative or future-action phrasing not tied to the current task. Routes the captured item into Todoist with the right project, section, labels (duration/energy/context), date, and priority. Also exposes daily-pull and digest primitives for morning briefings using the GTD-allégé methodology (configurable).
 ---
 
 # capture-todo
@@ -21,6 +21,8 @@ Generic Todoist capture + daily-triage skill. Detects actionable thoughts, class
 9. Configuration file
 10. Failure modes & fallbacks
 
+> **Status:** Sections 5–10 are not yet implemented. Cross-references to §8 (label convention) and §9 (config schema) below are intentional forward-references — they will resolve once the next implementation batch lands.
+
 ## 1. When to activate
 
 Activate **automatically** (no explicit user request needed) when the user's message contains a clear actionable signal:
@@ -39,6 +41,8 @@ Activate **automatically** (no explicit user request needed) when the user's mes
 - The "task" is something the user is doing right now (e.g. "I'm going to read this PR" — that's narration, not a todo)
 - The user explicitly says "don't add this" or similar opt-out
 
+**Tiebreaker — todo dropped mid-task:** if the user is in the middle of another task (coding, debugging, writing) AND drops a self-directed action that is *distinct from* the current task ("while I'm at it, remind me to email Pierre", "il faut aussi que je relance le client"), the strong-signal rule wins — capture immediately. Do NOT activate if the imperative is *part of* the current task ("I need to add error handling here").
+
 If unsure, default to NOT activating and let the user say "add it to todoist" explicitly.
 
 ## 2. Primitives overview
@@ -49,7 +53,7 @@ The skill exposes 4 primitives. Each primitive is a procedure Claude executes by
 |---|---|---|
 | `setup` | First run, or when convention drifted | §3 |
 | `capture` | Whenever an actionable signal is detected (auto) or user requests "add to todoist" | §4 |
-| `daily-pull` | Called by the morning routine — selects today's `must`, applies `stale` flag, builds candidate list | §5 |
+| `daily-pull` | Called by the morning routine — selects today's `must` (label, see §8), applies `stale` (label, see §8) flag, builds candidate list | §5 |
 | `digest` | Called by the morning routine after `daily-pull` — formats and delivers the briefing | §6 |
 
 Primitives are stateless — all state lives in Todoist + the user's config file (§9).
@@ -60,14 +64,16 @@ Run this primitive when the skill is invoked for the first time, or when `~/.con
 
 ### Step 3.1 — Discover existing structure
 
-Call (in parallel):
+**Preflight:** if the Todoist MCP server is not connected (any of the calls below returns a connection error), STOP. Tell the user: "Todoist MCP is not reachable. Connect the integration in your Claude settings (claude.ai → Settings → MCP), then re-run setup." Do not proceed.
+
+If MCP is reachable, call (in parallel):
 - `mcp__claude_ai_Todoist__user-info` — confirm timezone, plan
 - `mcp__claude_ai_Todoist__get-overview` — list projects + sections
 - `mcp__claude_ai_Todoist__find-labels` (limit 200) — list labels
 
 ### Step 3.2 — Compare against v2 convention
 
-The v2 label set is the 18 labels in §8. For each missing label, plan an `add-labels` call. For each label whose name matches an old convention (T5/T15/T30/T45/E1/E2/E3/Frog/Important/IA generated), plan a rename or delete.
+The v2 label set is the labels listed in §8. For each missing label, plan an `add-labels` call. For each label whose name matches an old convention (T5/T15/T30/T45/E1/E2/E3/Frog/Important/IA generated), plan a rename or delete.
 
 **Show the diff to the user before applying.** Wait for explicit "go" before mutating anything.
 
@@ -91,7 +97,7 @@ Create `~/.config/capture-todo/config.yaml` with the gathered mapping (see §9 s
 
 ### Step 3.6 — Done
 
-Print: "Setup complete. The skill is now active. Try saying 'remind me to test capture-todo tomorrow morning'."
+Print: "Setup complete. The skill is now active. Try saying 'remind me to send the report Friday morning'."
 
 ## 4. Capture primitive
 
@@ -105,31 +111,32 @@ Parse the user's message into a structured intent:
 content: <imperative form, ≤80 chars, action verb first>
 context_hints:
   topic: <work | personal | finance | hobby | unknown>
-  where: <ordi | tel | dehors | maison | courses | unknown>
+  where: <@ordi | @tel | @dehors | @maison | @courses | unknown>
   duration_estimate: <5min | 15min | 30min | 1h | unknown>
   energy_estimate: <easy | focus | deep | unknown>
   due_natural: <"tomorrow" | "friday" | "tonight" | null>
-  priority_signal: <p1 | p2 | p3 | p4>  # default p4 unless signals
+priority: <p1 | p2 | p3 | p4>  # default p4 unless explicit signals
 description: <full original phrasing if longer than content>
 ```
 
 Heuristics:
 - Topic: keyword match against config's project mapping (§9). If no match → `unknown`.
-- Where: keyword match against the user's contexts list.
+- Where: keyword match against the user's contexts list. Always include the `@` prefix to match the Todoist label name (e.g. `@ordi`, not `ordi`).
 - Duration: explicit ("ça prend 5 min") or estimate from verb (call → 15min, write doc → 1h, send email → 5min).
 - Energy: `deep` if requires focus/creative work, `focus` if structured but not heavy, `easy` for admin/errands.
 - Due: parse natural language. If user says "demain" and current time > 18h, interpret as next morning.
-- Priority signals: "urgent" / "ASAP" → p1, "important" → p2, default p4.
+- Priority: "urgent" / "ASAP" → p1, "important" → p2, default p4. (Top-level field, not part of `context_hints`, since it maps directly to the Todoist payload.)
 
 ### Step 4.2 — Decide routing
 
 | Confidence | Routing |
 |---|---|
 | Topic + where both known | Direct to project's section |
-| Topic known, where unknown | Project's default section, `@unknown` skipped |
-| Topic unknown | Inbox |
+| Topic known, where unknown | Project's default section, no `@` label |
+| Topic unknown, where known | Inbox, keep the `@` label |
+| Topic + where both unknown | Inbox, no `@` label |
 
-Always tag `ai-captured`. Never tag `Classified` (that label is reserved for cron-triaged items).
+Always tag `ai-captured`. Never tag `classified` (that label is reserved for cron-triaged items).
 
 ### Step 4.3 — Build the Todoist call
 
