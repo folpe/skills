@@ -116,14 +116,14 @@ Pipeline executed when activation conditions (§1) are met.
 Parse the user's message into a structured intent:
 
 ```yaml
-content: <imperative form, ≤80 chars, action verb first>
+content: <action-verb-first imperative, ≤80 chars, see content rules below>
 context_hints:
   topic: <work | personal | finance | hobby | unknown>
   duration_estimate: <5min | 15min | 30min | 1h | unknown>
   energy_estimate: <easy | focus | deep | unknown>
   due_natural: <"tomorrow" | "friday" | "tonight" | null>
 priority: <p1 | p2 | p3 | p4>  # default p4 unless explicit signals
-description: <always populated — see format below>
+description: <always populated — see description format below>
 ```
 
 Heuristics:
@@ -133,15 +133,49 @@ Heuristics:
 - Due: parse natural language. If user says "demain" and current time > 18h, interpret as next morning.
 - Priority: "urgent" / "ASAP" → p1, "important" → p2, default p4. (Top-level field, not part of `context_hints`, since it maps directly to the Todoist payload.)
 
-**Description format (always set):**
+**Content rules (the task title — what the user sees in Todoist lists):**
+
+- **Always start with an action verb** (infinitive in French, imperative in English): `Envoyer`, `Appeler`, `Rédiger`, `Send`, `Call`, `Draft`, `Review`, `Decide`. Never start with a noun (`Email Pierre` ❌ → `Envoyer email à Pierre` ✅).
+- **One concrete action only.** If the user dictates two actions ("appeler Brice et envoyer le devis"), split into two captures.
+- **Be specific about the object.** `Appeler` ❌ → `Appeler la banque pour le RDV crédit pro` ✅.
+- **Drop filler words** ("il faut que", "j'ai pensé qu'il faudrait", "du coup"). Reformulate cleanly.
+- **Keep it ≤80 chars.** Anything longer goes into the description.
+- **Match the user's working language** (French if dictated FR, English if EN — don't translate).
+
+**Description rules and format (always set, never verbatim):**
+
+The description is a **clean rewrite** of the user's original input — synthesis, not transcription. Goal: 3 months from now, the user opens the task and instantly understands the context without remembering exactly what they said.
+
+Structure:
 
 ```text
-> "<verbatim user phrasing>"
+<1–3 sentences of clean synthesis: the why, the context, any constraint or sub-detail the user mentioned>
 
 📅 Captured <YYYY-MM-DD HH:MM> · <classification summary>
 ```
 
-Where `<classification summary>` is a short comma-separated list of the inferred fields, e.g. `auto-classified · due: tomorrow · p2 · 15min · focus`. Skip any inferred field whose value is `unknown`. The verbatim quote helps the user recall the original context weeks later; the metadata line documents what the skill inferred so the user can audit/correct.
+Synthesis rules:
+- Reformulate in clean prose. Drop hesitations, filler, repetitions, off-topic asides.
+- Keep every information-bearing element: deadlines, names, conditions, constraints, sub-details.
+- If the original was already clean and short, the synthesis can be a single declarative sentence.
+- Never quote the verbatim input. Never include "the user said…" framing. Just write the cleaned version directly.
+- Stay in the user's working language.
+
+`<classification summary>` is a short comma-separated list of the inferred fields, e.g. `auto-classified · section: Brice · due: friday · p2 · 15min · focus`. Skip any inferred field whose value is `unknown`. The metadata line documents what the skill inferred so the user can audit/correct.
+
+**Example:**
+
+User dictates: *"ah merde faut que je rappelle Brice avant vendredi pour le truc du deck on en avait parlé hier soir t'sais"*
+
+Skill produces:
+
+- `content`: `Rappeler Brice pour finaliser le deck`
+- `description`:
+  ```
+  Échange à reprendre avec Brice avant vendredi pour finaliser le deck partagé (suite à la discussion de la veille).
+
+  📅 Captured 2026-05-02 14:22 · auto-classified · section: Brice · due: friday · p3 · 15min · easy
+  ```
 
 ### Step 4.2 — Decide routing
 
