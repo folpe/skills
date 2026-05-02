@@ -272,3 +272,94 @@ Cache the task ID in the config under `archive_task_id` (see §9) on first creat
 
 - Telegram fails (network, bad token) → still archive in Todoist; report the failure to the routine output (visible in `/schedule` logs)
 - No tasks at all in any bucket → send a one-liner: "🌅 Nothing pulled today. Inbox is clear or all tasks are someday/done."
+
+---
+
+## 7. Methodology (configurable)
+
+The skill ships with 4 methodologies. Pick one in `~/.config/capture-todo/config.yaml`:
+
+```yaml
+methodology: gtd-daily-pull-stale  # default
+```
+
+| Key | Best for | Daily cap | Stale logic |
+|---|---|---|---|
+| `gtd-daily-pull-stale` (default) | People whose tasks naturally drift over multiple days | 3 `must` | Yes (3-day threshold) |
+| `eat-the-frog` | Mornings reserved for one hard thing | 1 task + N quick wins | No |
+| `ivy-lee` | Strict-order execution, no replanning mid-day | 6 ordered | No |
+| `mit-pure` | Light commitment, focus on 3 things | 3 `must` | No |
+
+Switch methodology by editing the config file — no skill code changes needed.
+
+---
+
+## 8. Label convention v2
+
+| Group | Labels | Meaning |
+|---|---|---|
+| Duration | `5min` `15min` `30min` `1h` | Estimated time-on-task |
+| Energy | `easy` `focus` `deep` | Cognitive load required |
+| Lifecycle | `must` `next` `stale` `someday` | Where in the funnel — `must` = today, `next` = tomorrow candidate, `stale` = drift signal, `someday` = parking lot |
+| Context | `@ordi` `@tel` `@dehors` `@maison` `@courses` | Where/how to do it (GTD context — extensible per user) |
+| Provenance | `ai-captured` | Came in via this skill (vs. manual) |
+| Marker | `classified` | Triaged by `daily-pull` (do not apply manually) |
+
+**Rules:**
+- A task should always carry: 1 duration + 1 energy + ≥1 context + (lifecycle or none).
+- Multiple contexts allowed (`@ordi @maison` for "from home on laptop").
+- `must` is mutually exclusive with `someday`. `stale` overrides nothing — it sits next to other labels as a flag.
+- Never apply `classified` from `capture` — only `daily-pull` may set it.
+- All label names are lowercase. Context labels keep the leading `@`.
+
+---
+
+## 9. Configuration file
+
+Path: `~/.config/capture-todo/config.yaml`
+
+Schema:
+
+```yaml
+methodology: gtd-daily-pull-stale  # see §7
+
+projects:
+  work:     { id: "<todoist project id>", default_section: "<id or null>" }
+  personal: { id: "...", default_section: null }
+  finance:  { id: "...", default_section: null }    # optional
+  hobby:    { id: "...", default_section: null }    # optional
+inbox_fallback: true                                # send unknowns to Inbox
+
+# Map free-text topic keywords to project keys above.
+# Defaults are placeholders — replace with terms relevant to the user.
+topic_routing:
+  work:     ["client", "meeting", "deck", "code", "ship", "deploy"]
+  personal: ["maison", "rdv", "famille", "santé", "admin"]
+  finance:  ["impôt", "facture", "compta", "investis", "tax"]
+  hobby:    ["sport", "lecture", "jeu", "loisir"]
+
+contexts: ["@ordi", "@tel", "@dehors", "@maison", "@courses"]
+
+morning_slot_until: "12:00"  # before this time, prefer `deep` energy tasks
+
+archive_task_id: null  # filled by digest primitive on first run
+```
+
+Secrets (Telegram token + chat_id) live in `~/.config/capture-todo/secrets.env`, never in this YAML.
+
+Edit by hand — the skill will not overwrite user edits, only append missing keys when new versions of the skill add them.
+
+---
+
+## 10. Failure modes & fallbacks
+
+| Failure | Behavior |
+|---|---|
+| MCP Todoist down | Queue capture intents to `~/.config/capture-todo/pending.jsonl`. Flush on next successful capture. |
+| Telegram delivery fails | Still archive digest in Todoist comment. Surface error in routine output. |
+| Config file missing | Trigger `setup` primitive automatically. |
+| Config file malformed YAML | Refuse to operate. Print exact line+error. Suggest `cp config.yaml config.yaml.bak && rm config.yaml` to re-run setup. |
+| Plan limit hit on Todoist (Free plan, 5 projects) | Detect during setup, recommend section-based contortion (one section per logical project inside an existing parent project). |
+| Ambiguous capture | Ask 1 question max. If user doesn't answer, file to Inbox + `someday`. |
+| User says "actually no" right after capture | Offer one-shot undo: "Want me to delete the task I just created?" |
+| Label not found in Todoist (e.g. user skipped setup) | Skip the missing label silently — never block the capture. Surface a one-line warning. |
