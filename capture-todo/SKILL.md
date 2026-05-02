@@ -123,7 +123,7 @@ context_hints:
   energy_estimate: <easy | focus | deep | unknown>
   due_natural: <"tomorrow" | "friday" | "tonight" | null>
 priority: <p1 | p2 | p3 | p4>  # default p4 unless explicit signals
-description: <full original phrasing if longer than content>
+description: <always populated — see format below>
 ```
 
 Heuristics:
@@ -132,6 +132,16 @@ Heuristics:
 - Energy: `deep` if requires focus/creative work, `focus` if structured but not heavy, `easy` for admin/errands.
 - Due: parse natural language. If user says "demain" and current time > 18h, interpret as next morning.
 - Priority: "urgent" / "ASAP" → p1, "important" → p2, default p4. (Top-level field, not part of `context_hints`, since it maps directly to the Todoist payload.)
+
+**Description format (always set):**
+
+```text
+> "<verbatim user phrasing>"
+
+📅 Captured <YYYY-MM-DD HH:MM> · <classification summary>
+```
+
+Where `<classification summary>` is a short comma-separated list of the inferred fields, e.g. `auto-classified · due: tomorrow · p2 · 15min · focus`. Skip any inferred field whose value is `unknown`. The verbatim quote helps the user recall the original context weeks later; the metadata line documents what the skill inferred so the user can audit/correct.
 
 ### Step 4.2 — Decide routing
 
@@ -148,7 +158,7 @@ Use `mcp__claude_ai_Todoist__add-tasks` with:
 {
   "tasks": [{
     "content": "<extracted content>",
-    "description": "<extracted description, if any>",
+    "description": "<formatted per §4.1 description block — always present>",
     "projectId": "<resolved>",
     "sectionId": "<resolved or null>",
     "labels": ["<duration>", "<energy>"],
@@ -158,7 +168,7 @@ Use `mcp__claude_ai_Todoist__add-tasks` with:
 }
 ```
 
-Skip any label whose value is `unknown`.
+Skip any label whose value is `unknown`. The `description` field is always populated using the format defined in §4.1.
 
 ### Step 4.4 — Confirm to user
 
