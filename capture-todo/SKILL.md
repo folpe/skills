@@ -17,7 +17,7 @@ Generic Todoist capture + daily-triage skill. Detects actionable thoughts, class
 5. Daily-pull primitive
 6. Digest primitive
 7. Methodology (configurable)
-8. Label convention v3.1
+8. Label convention v3.2
 9. Configuration file
 10. Failure modes & fallbacks
 
@@ -80,9 +80,9 @@ If MCP is reachable, call (in parallel):
 - `mcp__claude_ai_Todoist__get-overview` — list projects + sections
 - `mcp__claude_ai_Todoist__find-labels` (limit 200) — list labels
 
-### Step 3.2 — Compare against v3.1 convention
+### Step 3.2 — Compare against v3.2 convention
 
-The v3.1 label set is the labels listed in §8. For each missing label, plan an `add-labels` call. For each label whose name matches an old convention (T5/T15/T30/T45/E1/E2/E3/Frog/Important/IA generated), plan a rename or delete.
+The v3.2 label set is the labels listed in §8. For each missing label, plan an `add-labels` call. For each label whose name matches an old convention (T5/T15/T30/T45/E1/E2/E3/Frog/Important/IA generated), plan a rename or delete.
 
 **Show the diff to the user before applying.** Wait for explicit "go" before mutating anything.
 
@@ -147,8 +147,8 @@ Where `<classification summary>` is a short comma-separated list of the inferred
 
 | Confidence | Routing |
 |---|---|
-| Topic known | Route to the matching project (use `default_section` if defined) |
-| Topic unknown | Inbox |
+| Topic known (single match) | Route to the matching project — use `section_name` from `topic_routing` if defined (auto-create the section in the project if missing and `auto_create_sections: true`), else `default_section` |
+| Topic unknown OR multiple matches | Inbox + tag `to-classify` (the user triages from the digest count, see §6.1) |
 
 ### Step 4.3 — Build the Todoist call
 
@@ -185,6 +185,7 @@ If routing went to Inbox, suggest a project: "Inbox for now — want me to file 
 - MCP Todoist unavailable → write to `~/.config/capture-todo/pending.jsonl` (one JSON intent per line). On next successful capture, flush pending queue first.
 - Ambiguous intent → ask 1 question max, then proceed with best guess + tag `someday` if still unsure.
 - Explicit "waiting on X" / "en attente de X" / "bloqué par" / "blocked by" → tag the captured task with `waiting` and skip duration/energy estimation (it's not actionable yet).
+- Topic resolution gives multiple matches OR no match → still capture (don't ask), file to Inbox with label `to-classify`. The digest surfaces the count so the user triages in batches.
 
 ---
 
@@ -234,6 +235,7 @@ Compute lists for the digest:
 - `stale_to_decide`: items with `stale` label
 - `waiting_on`: tasks labeled `waiting` (informational — surfaced for awareness, never picked as `must`)
 - `quick_wins`: any task with both `5min` and `easy` that is NOT already in `today_must` and NOT labeled `someday` (prevents double-counting in the digest)
+- `to_classify`: tasks in Inbox labeled `to-classify` (the count is shown in the digest so the user triages in batches)
 - `overdue`: due date < today
 
 Return as a structured object — does NOT mutate Todoist beyond Step 5.1 stale-flag and 5.2 must-flag changes.
@@ -276,6 +278,10 @@ Markdown template (Telegram supports a subset — use plain text + emoji, no hea
 ⚡ *Quick wins available* (5min + easy)
 • {qw1.content}
 • ...
+
+🧾 *{N} to classify* (Inbox)
+• {tc1.content}
+• ... (top 5, then `[… N more — see Inbox]`)
 
 🔴 *Overdue*
 • {od1.content}  · was due {od1.due}
@@ -330,7 +336,7 @@ Switch methodology by editing the config file — no skill code changes needed.
 
 ---
 
-## 8. Label convention v3.1
+## 8. Label convention v3.2
 
 | Group | Labels | Meaning |
 |---|---|---|
@@ -338,12 +344,14 @@ Switch methodology by editing the config file — no skill code changes needed.
 | Energy | `easy` `focus` `deep` | Cognitive load required |
 | Lifecycle | `must` `next` `stale` `someday` | Funnel position — `must` = today (max 3), `next` = tomorrow candidate, `stale` = drift signal (auto-applied >3d), `someday` = parking lot |
 | État | `waiting` | Blocked by a third party (reply, delivery, validation). Excluded from `daily-pull` candidates and from `stale` detection — not actionable. |
+| Triage | `to-classify` | Capture was ambiguous (multiple topic matches or none) and went to Inbox. Surfaced in the digest as a count so the user triages periodically. |
 
 **Rules:**
 - A task should ideally carry: 1 duration + 1 energy + (lifecycle or `waiting` or none). Best-effort, not enforced — capture (§4.3) skips fields it cannot infer.
 - `must` is mutually exclusive with `someday` and with `waiting`.
 - `stale` is a flag that can sit alongside any other label except `waiting`.
 - `waiting` overrides lifecycle for daily-pull purposes — even if the task has `must` from yesterday, `waiting` removes it from today's selection.
+- `to-classify` is set by `capture` only when routing is ambiguous (see §4.2). The user removes it manually after triaging.
 - All label names are lowercase, no `@` prefix.
 
 ---
@@ -372,13 +380,30 @@ projects:
     default_section: null
   inbox_fallback: true    # send unknowns to Inbox if no topic match
 
-# Map free-text topic keywords to project keys above.
-# Defaults are placeholders — replace with terms relevant to the user.
+# Topic routing: every entry is a logical bucket with keywords, target project,
+# and optionally a target section_name. If section_name is set and the section
+# doesn't exist, it will be auto-created when `auto_create_sections: true`.
+# Multiple matches across buckets → file to Inbox + tag `to-classify`.
 topic_routing:
-  work:     ["client", "meeting", "deck", "code", "ship", "deploy"]
-  personal: ["maison", "rdv", "famille", "santé", "admin"]
-  finance:  ["impôt", "facture", "compta", "investis", "tax"]
-  hobby:    ["sport", "lecture", "jeu", "loisir"]
+  work:
+    keywords: ["client", "meeting", "deck", "code", "ship", "deploy"]
+    project: work
+  personal:
+    keywords: ["maison", "rdv", "famille", "santé", "admin"]
+    project: personal
+  finance:
+    keywords: ["impôt", "facture", "compta", "investis", "tax"]
+    project: finance
+  hobby:
+    keywords: ["sport", "lecture", "jeu", "loisir"]
+    project: hobby
+  # Example of a project-with-section bucket (auto-created if missing):
+  # solaar:
+  #   keywords: ["solaar"]
+  #   project: work
+  #   section_name: "Solaar"
+
+auto_create_sections: true  # create missing sections referenced by topic_routing
 
 morning_slot_until: "12:00"  # before this time, prefer `deep` energy tasks
 
