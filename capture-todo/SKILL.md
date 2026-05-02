@@ -1,7 +1,7 @@
 ---
 name: capture-todo
 description: >
-  Use when the user expresses a task, idea, reminder, or note in any form — dictated, typed, mid-sentence, or as an explicit "add to my todo". Triggers: "remind me to", "I need to", "don't forget", "add to my list", "todo", "note ça", "j'ai pensé à", "il faudrait", "rappelle-moi", "j'oublie pas", "faut que je", "une idée à creuser", any imperative or future-action phrasing not tied to the current task. Routes the captured item into Todoist with the right project, section, labels (duration/energy/context), date, and priority. Also exposes daily-pull and digest primitives for morning briefings using the GTD-allégé methodology (configurable).
+  Use when the user expresses a task, idea, reminder, or note in any form — dictated, typed, mid-sentence, or as an explicit "add to my todo". Triggers: "remind me to", "I need to", "don't forget", "add to my list", "todo", "note ça", "j'ai pensé à", "il faudrait", "rappelle-moi", "j'oublie pas", "faut que je", "une idée à creuser", any imperative or future-action phrasing not tied to the current task. Routes the captured item into Todoist with the right project, section, labels (duration/energy/state), date, and priority. Also exposes daily-pull and digest primitives for morning briefings using the GTD-allégé methodology (configurable).
 ---
 
 # capture-todo
@@ -17,7 +17,7 @@ Generic Todoist capture + daily-triage skill. Detects actionable thoughts, class
 5. Daily-pull primitive
 6. Digest primitive
 7. Methodology (configurable)
-8. Label convention v2
+8. Label convention v3.1
 9. Configuration file
 10. Failure modes & fallbacks
 
@@ -80,9 +80,9 @@ If MCP is reachable, call (in parallel):
 - `mcp__claude_ai_Todoist__get-overview` — list projects + sections
 - `mcp__claude_ai_Todoist__find-labels` (limit 200) — list labels
 
-### Step 3.2 — Compare against v2 convention
+### Step 3.2 — Compare against v3.1 convention
 
-The v2 label set is the labels listed in §8. For each missing label, plan an `add-labels` call. For each label whose name matches an old convention (T5/T15/T30/T45/E1/E2/E3/Frog/Important/IA generated), plan a rename or delete.
+The v3.1 label set is the labels listed in §8. For each missing label, plan an `add-labels` call. For each label whose name matches an old convention (T5/T15/T30/T45/E1/E2/E3/Frog/Important/IA generated), plan a rename or delete.
 
 **Show the diff to the user before applying.** Wait for explicit "go" before mutating anything.
 
@@ -92,13 +92,12 @@ Use `mcp__claude_ai_Todoist__add-labels` (batch) and `update-labels` (batch).
 
 ### Step 3.4 — Detect projects/sections mapping
 
-Ask the user 5 questions, in this order, accepting "skip" for any:
+Ask the user 4 questions, in this order, accepting "skip" for any:
 
 1. Which project holds your **work / pro** tasks? (offer existing project names + "create new")
 2. Which project holds your **personal** tasks?
 3. Which project holds your **finance / investments**? (optional)
 4. Which project holds your **hobbies / side**? (optional)
-5. List your physical contexts in use (defaults: `@ordi @tel @dehors @maison @courses`).
 
 ### Step 3.5 — Write config
 
@@ -120,7 +119,6 @@ Parse the user's message into a structured intent:
 content: <imperative form, ≤80 chars, action verb first>
 context_hints:
   topic: <work | personal | finance | hobby | unknown>
-  where: <@ordi | @tel | @dehors | @maison | @courses | unknown>
   duration_estimate: <5min | 15min | 30min | 1h | unknown>
   energy_estimate: <easy | focus | deep | unknown>
   due_natural: <"tomorrow" | "friday" | "tonight" | null>
@@ -130,7 +128,6 @@ description: <full original phrasing if longer than content>
 
 Heuristics:
 - Topic: keyword match against config's project mapping (§9). If no match → `unknown`.
-- Where: keyword match against the user's contexts list. Always include the `@` prefix to match the Todoist label name (e.g. `@ordi`, not `ordi`).
 - Duration: explicit ("ça prend 5 min") or estimate from verb (call → 15min, write doc → 1h, send email → 5min).
 - Energy: `deep` if requires focus/creative work, `focus` if structured but not heavy, `easy` for admin/errands.
 - Due: parse natural language. If user says "demain" and current time > 18h, interpret as next morning.
@@ -140,12 +137,8 @@ Heuristics:
 
 | Confidence | Routing |
 |---|---|
-| Topic + where both known | Direct to project's section |
-| Topic known, where unknown | Project's default section, no `@` label |
-| Topic unknown, where known | Inbox, keep the `@` label |
-| Topic + where both unknown | Inbox, no `@` label |
-
-Always tag `ai-captured`. Never tag `classified` (that label is reserved for cron-triaged items).
+| Topic known | Route to the matching project (use `default_section` if defined) |
+| Topic unknown | Inbox |
 
 ### Step 4.3 — Build the Todoist call
 
@@ -158,7 +151,7 @@ Use `mcp__claude_ai_Todoist__add-tasks` with:
     "description": "<extracted description, if any>",
     "projectId": "<resolved>",
     "sectionId": "<resolved or null>",
-    "labels": ["<duration>", "<energy>", "<@where>", "ai-captured"],
+    "labels": ["<duration>", "<energy>"],
     "dueString": "<natural>",
     "priority": "<p1-p4>"
   }]
@@ -181,6 +174,7 @@ If routing went to Inbox, suggest a project: "Inbox for now — want me to file 
 
 - MCP Todoist unavailable → write to `~/.config/capture-todo/pending.jsonl` (one JSON intent per line). On next successful capture, flush pending queue first.
 - Ambiguous intent → ask 1 question max, then proceed with best guess + tag `someday` if still unsure.
+- Explicit "waiting on X" / "en attente de X" / "bloqué par" / "blocked by" → tag the captured task with `waiting` and skip duration/energy estimation (it's not actionable yet).
 
 ---
 
@@ -198,7 +192,7 @@ Find tasks where:
 Tool: `mcp__claude_ai_Todoist__find-tasks` with filter:
 
 ```
-!@must & !@next & !@stale & !@someday & (created before: -3 days | no date & created before: -3 days)
+!@must & !@next & !@stale & !@someday & !@waiting & (created before: -3 days | no date & created before: -3 days)
 ```
 
 This catches any task without a lifecycle label that has been sitting more than 3 days. Tasks already in the lifecycle (`must`/`next`/`stale`/`someday`) are excluded — `stale` already has the flag, the others have an active intent.
@@ -217,6 +211,7 @@ Pick candidates by score:
 | Due today or overdue | +3 |
 | Labeled `stale` | +2 (forces decision) |
 | Energy matches current slot (`deep` if `now < config.morning_slot_until`, else `easy`) | +1 |
+| Task labeled `waiting` | EXCLUDE from candidates entirely (blocked by third party — not actionable today) |
 
 Top 3 by score → keep `must`. Drop `must` from anything that didn't make the cut.
 
@@ -227,6 +222,7 @@ Top 3 by score → keep `must`. Drop `must` from anything that didn't make the c
 Compute lists for the digest:
 - `today_must`: the 3 selected
 - `stale_to_decide`: items with `stale` label
+- `waiting_on`: tasks labeled `waiting` (informational — surfaced for awareness, never picked as `must`)
 - `quick_wins`: any task with both `5min` and `easy` that is NOT already in `today_must` and NOT labeled `someday` (prevents double-counting in the digest)
 - `overdue`: due date < today
 
@@ -261,6 +257,10 @@ Markdown template (Telegram supports a subset — use plain text + emoji, no hea
 
 ⏳ *Stale (>3 days, decide)*
 • {stale1.content} — do / downgrade / kill?
+• ...
+
+⏸ *Waiting on others*
+• {wait1.content}
 • ...
 
 ⚡ *Quick wins available* (5min + easy)
@@ -320,23 +320,21 @@ Switch methodology by editing the config file — no skill code changes needed.
 
 ---
 
-## 8. Label convention v2
+## 8. Label convention v3.1
 
 | Group | Labels | Meaning |
 |---|---|---|
 | Duration | `5min` `15min` `30min` `1h` | Estimated time-on-task |
 | Energy | `easy` `focus` `deep` | Cognitive load required |
-| Lifecycle | `must` `next` `stale` `someday` | Where in the funnel — `must` = today, `next` = tomorrow candidate, `stale` = drift signal, `someday` = parking lot |
-| Context | `@ordi` `@tel` `@dehors` `@maison` `@courses` | Where/how to do it (GTD context — extensible per user) |
-| Provenance | `ai-captured` | Came in via this skill (vs. manual) |
-| Marker | `classified` | Triaged by `daily-pull` (do not apply manually) |
+| Lifecycle | `must` `next` `stale` `someday` | Funnel position — `must` = today (max 3), `next` = tomorrow candidate, `stale` = drift signal (auto-applied >3d), `someday` = parking lot |
+| État | `waiting` | Blocked by a third party (reply, delivery, validation). Excluded from `daily-pull` candidates and from `stale` detection — not actionable. |
 
 **Rules:**
-- A task should ideally carry: 1 duration + 1 energy + ≥1 context + (lifecycle or none). The capture pipeline (§4.3) skips any field it could not infer — best-effort, not enforced.
-- Multiple contexts allowed (`@ordi @maison` for "from home on laptop").
-- `must` is mutually exclusive with `someday`. `stale` overrides nothing — it sits next to other labels as a flag.
-- Never apply `classified` from `capture` — only `daily-pull` may set it.
-- All label names are lowercase. Context labels keep the leading `@`.
+- A task should ideally carry: 1 duration + 1 energy + (lifecycle or `waiting` or none). Best-effort, not enforced — capture (§4.3) skips fields it cannot infer.
+- `must` is mutually exclusive with `someday` and with `waiting`.
+- `stale` is a flag that can sit alongside any other label except `waiting`.
+- `waiting` overrides lifecycle for daily-pull purposes — even if the task has `must` from yesterday, `waiting` removes it from today's selection.
+- All label names are lowercase, no `@` prefix.
 
 ---
 
@@ -372,8 +370,6 @@ topic_routing:
   finance:  ["impôt", "facture", "compta", "investis", "tax"]
   hobby:    ["sport", "lecture", "jeu", "loisir"]
 
-contexts: ["@ordi", "@tel", "@dehors", "@maison", "@courses"]
-
 morning_slot_until: "12:00"  # before this time, prefer `deep` energy tasks
 
 notify_on_empty: false  # if true, send Telegram ping even when no tasks pulled (see §6.4)
@@ -382,6 +378,8 @@ archive_task_id: null  # filled by digest primitive on first run
 ```
 
 The skill writes back to this file in only one case: `archive_task_id` is populated by the `digest` primitive the first time it creates the "Daily Briefing" anchor task (§6.3). All other keys are user-managed.
+
+The `waiting` label has no config — it's set manually or by capture when the user expresses a blocker. Daily-pull and stale-detection respect it automatically (see §5.1, §5.2).
 
 Secrets (Telegram token + chat_id) live in `~/.config/capture-todo/secrets.env`, never in this YAML.
 
