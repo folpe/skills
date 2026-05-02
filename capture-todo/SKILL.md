@@ -21,7 +21,16 @@ Generic Todoist capture + daily-triage skill. Detects actionable thoughts, class
 9. Configuration file
 10. Failure modes & fallbacks
 
-> **Status:** Sections 5–10 are not yet implemented. Cross-references to §8 (label convention) and §9 (config schema) below are intentional forward-references — they will resolve once the next implementation batch lands.
+## Prerequisites
+
+Before running `setup`:
+
+- **Claude Code (or claude.ai) with MCP support** — needed for the Todoist integration to be reachable.
+- **Todoist MCP server connected** — install and authenticate the official Todoist MCP from your Claude settings. The skill will refuse to operate if it cannot reach the MCP.
+- **Telegram bot (for the digest only)** — create a bot via [@BotFather](https://t.me/BotFather), grab the token, send `/start` to your new bot, and find your `chat_id` from `https://api.telegram.org/bot<TOKEN>/getUpdates`. Store both in `~/.config/capture-todo/secrets.env` with mode `0600`.
+- **Cron / schedule** — for the daily digest to fire automatically, the user creates a routine (Claude `/schedule` or system cron) that calls `daily-pull` then `digest`. The skill itself does not run on a timer; it exposes the primitives.
+
+If any of these are missing, the `capture` primitive still works for ad-hoc capture; only the morning digest depends on Telegram + cron.
 
 ## 1. When to activate
 
@@ -186,9 +195,15 @@ Find tasks where:
 - Not completed
 - Not already labeled `stale` or `someday`
 
-Tool: `mcp__claude_ai_Todoist__find-tasks` with filter `(no labels & created before -3 days) | (no date & created before -3 days)`.
+Tool: `mcp__claude_ai_Todoist__find-tasks` with filter:
 
-For each, add label `stale` via `update-tasks`.
+```
+!@must & !@next & !@stale & !@someday & (created before: -3 days | no date & created before: -3 days)
+```
+
+This catches any task without a lifecycle label that has been sitting more than 3 days. Tasks already in the lifecycle (`must`/`next`/`stale`/`someday`) are excluded — `stale` already has the flag, the others have an active intent.
+
+For each result, add label `stale` via `update-tasks`.
 
 ### Step 5.2 — Select today's `must` (max 3)
 
@@ -201,16 +216,18 @@ Pick candidates by score:
 | Priority p1 | +3 |
 | Due today or overdue | +3 |
 | Labeled `stale` | +2 (forces decision) |
-| Energy matches morning slot (`deep` mornings, `easy` afternoons) | +1 |
+| Energy matches current slot (`deep` if `now < config.morning_slot_until`, else `easy`) | +1 |
 
 Top 3 by score → keep `must`. Drop `must` from anything that didn't make the cut.
+
+**Tie-break:** if multiple tasks share the same score, prefer the one with the oldest creation date. Stable, deterministic, rewards old commitments.
 
 ### Step 5.3 — Build candidate buckets
 
 Compute lists for the digest:
 - `today_must`: the 3 selected
 - `stale_to_decide`: items with `stale` label
-- `quick_wins`: any `5min` + `easy` not yet labeled `someday`
+- `quick_wins`: any task with both `5min` and `easy` that is NOT already in `today_must` and NOT labeled `someday` (prevents double-counting in the digest)
 - `overdue`: due date < today
 
 Return as a structured object — does NOT mutate Todoist beyond Step 5.1 stale-flag and 5.2 must-flag changes.
@@ -234,7 +251,7 @@ Format and deliver the morning briefing. Called after `daily-pull`.
 
 Markdown template (Telegram supports a subset — use plain text + emoji, no headers > H2):
 
-```
+```text
 🌅 *Daily briefing — {date}*
 
 🎯 *Today's 3 must* ({weekday})
@@ -258,20 +275,27 @@ If a section is empty, omit it entirely (don't print "0 stale items").
 
 ### Step 6.2 — Deliver to Telegram
 
-POST to `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage` with `parse_mode=Markdown`, `chat_id=${TELEGRAM_CHAT_ID}`.
+POST to `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage` with `parse_mode=MarkdownV2`, `chat_id=${TELEGRAM_CHAT_ID}`.
 
-Use `Bash` tool with `curl`. Read token + chat_id from `~/.config/capture-todo/secrets.env` (sourced via `set -a; source secrets.env; set +a`).
+**Escape user content before interpolation.** Telegram MarkdownV2 requires escaping these characters in any non-markup text: `_`, `*`, `[`, `]`, `(`, `)`, `~`, `` ` ``, `>`, `#`, `+`, `-`, `=`, `|`, `{`, `}`, `.`, `!`. Apply a backslash escape (e.g. `it_works` → `it\_works`) to every task `content`, `due`, and label string before substituting into the template. Failing to escape will produce a 400 error from the Telegram API.
+
+Use `Bash` tool with `curl --data-urlencode text=...`. Read token + chat_id from `~/.config/capture-todo/secrets.env` (sourced via `set -a; source secrets.env; set +a`).
+
+If the formatted message would exceed 4000 characters (Telegram cap is 4096), truncate the `stale_to_decide` and `quick_wins` sections to the top 5 entries and append `[… N more — see Todoist]` to each truncated list.
 
 ### Step 6.3 — Archive in Todoist
 
-Locate the task `Daily Briefing` (in the user's primary work project, default section if any, else inbox). If not found, create it once with a recurring "every monday" rule so it never disappears but doesn't pollute the daily list. Append today's digest as a new comment via `mcp__claude_ai_Todoist__add-comments`.
+Locate the task `Daily Briefing` for archive. Resolution order:
+1. If `config.archive_task_id` is set, use it directly.
+2. Else search by name in `projects.work` → `projects.personal` → Inbox (first hit wins).
+3. If not found, create it once in the same project (work > personal > Inbox), with label `someday` so it doesn't appear in the daily-pull, and **no recurrence** (it's a permanent anchor, not a recurring chore). Cache the new ID in `config.archive_task_id`.
 
-Cache the task ID in the config under `archive_task_id` (see §9) on first creation.
+Append today's digest as a new comment via `mcp__claude_ai_Todoist__add-comments`.
 
 ### Step 6.4 — Failure modes
 
 - Telegram fails (network, bad token) → still archive in Todoist; report the failure to the routine output (visible in `/schedule` logs)
-- No tasks at all in any bucket → send a one-liner: "🌅 Nothing pulled today. Inbox is clear or all tasks are someday/done."
+- No tasks at all in any bucket → silent by default (no Telegram message sent). To opt-in to a confirmation ping, set `notify_on_empty: true` in config (see §9). Either way, still archive a comment in Todoist saying "🌅 Nothing pulled — clear day."
 
 ---
 
@@ -282,6 +306,8 @@ The skill ships with 4 methodologies. Pick one in `~/.config/capture-todo/config
 ```yaml
 methodology: gtd-daily-pull-stale  # default
 ```
+
+The default (`gtd-daily-pull-stale`) automates triage via the `stale` flag. `mit-pure` is for users who triage manually — same daily cap, no automation. The other two re-shape what counts as a "day's commitment."
 
 | Key | Best for | Daily cap | Stale logic |
 |---|---|---|---|
@@ -306,7 +332,7 @@ Switch methodology by editing the config file — no skill code changes needed.
 | Marker | `classified` | Triaged by `daily-pull` (do not apply manually) |
 
 **Rules:**
-- A task should always carry: 1 duration + 1 energy + ≥1 context + (lifecycle or none).
+- A task should ideally carry: 1 duration + 1 energy + ≥1 context + (lifecycle or none). The capture pipeline (§4.3) skips any field it could not infer — best-effort, not enforced.
 - Multiple contexts allowed (`@ordi @maison` for "from home on laptop").
 - `must` is mutually exclusive with `someday`. `stale` overrides nothing — it sits next to other labels as a flag.
 - Never apply `classified` from `capture` — only `daily-pull` may set it.
@@ -324,11 +350,19 @@ Schema:
 methodology: gtd-daily-pull-stale  # see §7
 
 projects:
-  work:     { id: "<todoist project id>", default_section: "<id or null>" }
-  personal: { id: "...", default_section: null }
-  finance:  { id: "...", default_section: null }    # optional
-  hobby:    { id: "...", default_section: null }    # optional
-inbox_fallback: true                                # send unknowns to Inbox
+  work:
+    id: "<todoist project id>"
+    default_section: "<id or null>"
+  personal:
+    id: "..."
+    default_section: null
+  finance:                # optional
+    id: "..."
+    default_section: null
+  hobby:                  # optional
+    id: "..."
+    default_section: null
+  inbox_fallback: true    # send unknowns to Inbox if no topic match
 
 # Map free-text topic keywords to project keys above.
 # Defaults are placeholders — replace with terms relevant to the user.
@@ -342,8 +376,12 @@ contexts: ["@ordi", "@tel", "@dehors", "@maison", "@courses"]
 
 morning_slot_until: "12:00"  # before this time, prefer `deep` energy tasks
 
+notify_on_empty: false  # if true, send Telegram ping even when no tasks pulled (see §6.4)
+
 archive_task_id: null  # filled by digest primitive on first run
 ```
+
+The skill writes back to this file in only one case: `archive_task_id` is populated by the `digest` primitive the first time it creates the "Daily Briefing" anchor task (§6.3). All other keys are user-managed.
 
 Secrets (Telegram token + chat_id) live in `~/.config/capture-todo/secrets.env`, never in this YAML.
 
@@ -359,7 +397,10 @@ Edit by hand — the skill will not overwrite user edits, only append missing ke
 | Telegram delivery fails | Still archive digest in Todoist comment. Surface error in routine output. |
 | Config file missing | Trigger `setup` primitive automatically. |
 | Config file malformed YAML | Refuse to operate. Print exact line+error. Suggest `cp config.yaml config.yaml.bak && rm config.yaml` to re-run setup. |
-| Plan limit hit on Todoist (Free plan, 5 projects) | Detect during setup, recommend section-based contortion (one section per logical project inside an existing parent project). |
+| Plan limit hit on Todoist (Free plan, 5 projects) | Detect during setup. Recommend creating one section per logical project inside an existing parent project, then setting all `topic_routing` buckets to that parent project's `id` and using distinct `default_section` IDs to differentiate routing destinations. |
 | Ambiguous capture | Ask 1 question max. If user doesn't answer, file to Inbox + `someday`. |
 | User says "actually no" right after capture | Offer one-shot undo: "Want me to delete the task I just created?" |
 | Label not found in Todoist (e.g. user skipped setup) | Skip the missing label silently — never block the capture. Surface a one-line warning. |
+| Todoist API rate limit (HTTP 429) | Back off 1s and retry once. If still 429, queue capture intents to `pending.jsonl` and surface a warning in the routine output. |
+| Telegram message exceeds 4096 chars | Truncate `stale_to_decide` and `quick_wins` to top 5 each, append `[… N more — see Todoist]`. See §6.2. |
+| Todoist `find-tasks` returns more than one page | Iterate through pagination cursors before computing buckets. Don't trust a single-page response when more than 50 results are possible. |
