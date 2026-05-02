@@ -172,3 +172,103 @@ If routing went to Inbox, suggest a project: "Inbox for now — want me to file 
 
 - MCP Todoist unavailable → write to `~/.config/capture-todo/pending.jsonl` (one JSON intent per line). On next successful capture, flush pending queue first.
 - Ambiguous intent → ask 1 question max, then proceed with best guess + tag `someday` if still unsure.
+
+---
+
+## 5. Daily-pull primitive
+
+Run by the morning routine. Selects today's commitments and updates lifecycle labels.
+
+### Step 5.1 — Apply stale-flag
+
+Find tasks where:
+- Created or last-modified more than 3 days ago
+- Not completed
+- Not already labeled `stale` or `someday`
+
+Tool: `mcp__claude_ai_Todoist__find-tasks` with filter `(no labels & created before -3 days) | (no date & created before -3 days)`.
+
+For each, add label `stale` via `update-tasks`.
+
+### Step 5.2 — Select today's `must` (max 3)
+
+Pick candidates by score:
+
+| Signal | Weight |
+|---|---|
+| Already labeled `must` from yesterday | +5 |
+| Labeled `next` | +4 |
+| Priority p1 | +3 |
+| Due today or overdue | +3 |
+| Labeled `stale` | +2 (forces decision) |
+| Energy matches morning slot (`deep` mornings, `easy` afternoons) | +1 |
+
+Top 3 by score → keep `must`. Drop `must` from anything that didn't make the cut.
+
+### Step 5.3 — Build candidate buckets
+
+Compute lists for the digest:
+- `today_must`: the 3 selected
+- `stale_to_decide`: items with `stale` label
+- `quick_wins`: any `5min` + `easy` not yet labeled `someday`
+- `overdue`: due date < today
+
+Return as a structured object — does NOT mutate Todoist beyond Step 5.1 stale-flag and 5.2 must-flag changes.
+
+### Step 5.4 — Methodology variants
+
+If config (`§9.methodology`) is one of:
+- `eat-the-frog` — pick 1 highest-scored task, force as the day's headline; ignore `must` cap
+- `ivy-lee` — pick 6 by score, present in strict order, no `stale` logic
+- `mit-pure` — select 3 `must`, no `stale` logic at all
+
+Default: `gtd-daily-pull-stale` (the algorithm above).
+
+---
+
+## 6. Digest primitive
+
+Format and deliver the morning briefing. Called after `daily-pull`.
+
+### Step 6.1 — Format
+
+Markdown template (Telegram supports a subset — use plain text + emoji, no headers > H2):
+
+```
+🌅 *Daily briefing — {date}*
+
+🎯 *Today's 3 must* ({weekday})
+1. {task1.content}  · _{task1.duration} · {task1.energy}_
+2. {task2.content}  · _{task2.duration} · {task2.energy}_
+3. {task3.content}  · _{task3.duration} · {task3.energy}_
+
+⏳ *Stale (>3 days, decide)*
+• {stale1.content} — do / downgrade / kill?
+• ...
+
+⚡ *Quick wins available* (5min + easy)
+• {qw1.content}
+• ...
+
+🔴 *Overdue*
+• {od1.content}  · was due {od1.due}
+```
+
+If a section is empty, omit it entirely (don't print "0 stale items").
+
+### Step 6.2 — Deliver to Telegram
+
+POST to `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage` with `parse_mode=Markdown`, `chat_id=${TELEGRAM_CHAT_ID}`.
+
+Use `Bash` tool with `curl`. Read token + chat_id from `~/.config/capture-todo/secrets.env` (sourced via `set -a; source secrets.env; set +a`).
+
+### Step 6.3 — Archive in Todoist
+
+Locate the task `Daily Briefing` (in the user's primary work project, default section if any, else inbox). If not found, create it once with a recurring "every monday" rule so it never disappears but doesn't pollute the daily list. Append today's digest as a new comment via `mcp__claude_ai_Todoist__add-comments`.
+
+Cache the task ID in the config under `archive_task_id` (see §9) on first creation.
+
+### Step 6.4 — Failure modes
+
+- Telegram fails (network, bad token) → still archive in Todoist; report the failure to the routine output (visible in `/schedule` logs)
+- No tasks at all in any bucket → send a one-liner: "🌅 Nothing pulled today. Inbox is clear or all tasks are someday/done."
